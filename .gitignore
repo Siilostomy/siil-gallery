@@ -7,7 +7,7 @@ pkce_state.json
 comments.json
 data/
 trash/
-model_refs/
+
 __pycache__/
 *.pyc
 venv/
