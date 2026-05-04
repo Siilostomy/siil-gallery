@@ -1,11 +1,11 @@
 """
 SIIL GENERATION PROMPT CONSTANTS
 ==================================
-Shared identity blocks, ostomy scar, studio lighting preset, and wrap desc.
+Shared identity blocks, ostomy scar, ostomy bag, studio lighting preset, and wrap desc.
 Import this in every generation script — these are the single source of truth.
 
 Usage:
-    from siil_prompts import SIIL_STUDIO_COLOR, OSTOMY_SCAR, WRAP_DESC
+    from siil_prompts import SIIL_STUDIO_COLOR, OSTOMY_SCAR, OSTOMY_BAG_RIGHT, WRAP_DESC
     from siil_colors import WRAP_BASIC, get_wrap_prompt
 """
 
@@ -63,6 +63,27 @@ COORDINATE REFERENCE FOR CONSISTENCY: If the navel is at position (0, 0), the sc
 # Legacy alias — updated to match realistic appearance
 OSTOMY_SCAR = """OSTOMY SCAR (FIXED LOCATION — lower RIGHT abdomen, 3 cm right of navel, 4 cm below):
 Fully-healed stoma closure scar. SHAPE: elongated horizontal surgical scar line ~4-5 cm wide x 1-1.5 cm tall, like a horizontal ellipse. Slightly raised linear scar tissue with visible perpendicular suture track marks (small dots/lines) on both sides of the main scar line. Color slightly lighter/pinker than surrounding skin. Real, honest, dignified — not airbrushed. Only visible in the skin gap between clothing hem and wrap top edge."""
+
+# ── OSTOMY BAG / POUCH DESCRIPTION ────────────────────────────────────────────
+# Based on real ostomy product reference photography.
+# Key visual facts (critical for AI accuracy):
+#   - Shape is ROUND / CIRCULAR / DOME-SHAPED — like a half-sphere or circular disk
+#   - It PROTRUDES from the abdomen (convex) — NOT flat against skin
+#   - Size: approximately 14-18cm diameter circle
+#   - Color: light beige / flesh-tone / warm cream — matte surface
+#   - Has a flat adhesive backing plate against skin; dome protrudes forward
+#   - The reveal gesture: one hand pulls garment DOWN or to the SIDE to expose it
+#   - Model's expression: confident, upward gaze or mirror gaze — empowered, NOT ashamed
+
+OSTOMY_BAG_RIGHT = """OSTOMY POUCH — RIGHT SIDE (KEY VISUAL ELEMENT, must be clearly rendered):
+LOCATION: Lower RIGHT abdomen. The pouch attaches at the stoma site — 3 cm to the RIGHT of the navel, 4 cm BELOW it. Always right lower quadrant, never left.
+SHAPE: ROUND and DOME-SHAPED — a circular convex pouch like a half-sphere or flattened dome. Approximately 14-18 cm in diameter. The pouch protrudes from the abdomen — it is NOT flat. It is visible, prominent, and clearly dome-shaped.
+COLOR: Light beige / warm cream / flesh-tone. Matte surface. The backing plate is flat against skin; the dome protrudes forward.
+VISIBILITY: The pouch must be CLEARLY VISIBLE and PROMINENT — the central visual element of the reveal moment. Do NOT minimise or flatten it. It is a real ostomy bag worn with full confidence.
+REVEAL GESTURE: The model intentionally pulls her garment (wrap/top) DOWN or to the SIDE with one hand to reveal the pouch. Her expression is confident, proud, and empowered — not apologetic. She may look at the mirror, look upward, or straight at camera with a natural warm smile."""
+
+OSTOMY_BAG_REVEAL_AMARA = """OSTOMY POUCH REVEAL — AMARA:
+Amara deliberately reveals her ostomy pouch by lifting or pulling aside the SIIL wrap with one hand. The pouch is on her lower RIGHT abdomen — round, dome-shaped, light beige, clearly protruding. She shows it with complete ownership and pride. Her other hand is relaxed — on her hip, touching her side, or at her chest. Her expression is powerful and beautiful: chin up, warm smile, direct gaze. The pouch is the hero of this moment alongside her confidence."""
 
 # ── WRAP PRODUCT DESCRIPTION (SHAPE) ──────────────────────────────────────────
 WRAP_DESC_BASIC = """SIIL BASIC WRAP (shape from Ref 2): A smooth wide stretch-fabric band worn around the lower abdomen and waist — covers the ostomy area with a clean flat surface. Smooth, matte, zero creases. The wrap sits from just above the hip bones up to the natural waist. Copy the silhouette from the reference image exactly — it is NOT a belt, NOT a tube top, NOT underwear. It is a wide band covering the lower abdomen."""
