@@ -5,11 +5,12 @@ Shared identity blocks, ostomy scar, studio lighting preset, and wrap desc.
 Import this in every generation script — these are the single source of truth.
 
 Usage:
-    from siil_prompts import SIIL_WARM_EDITORIAL, OSTOMY_SCAR, WRAP_DESC
+    from siil_prompts import SIIL_STUDIO_COLOR, OSTOMY_SCAR, WRAP_DESC
     from siil_colors import WRAP_BASIC, get_wrap_prompt
 """
 
-# ── STUDIO LIGHTING PRESET — "SIIL WARM EDITORIAL" ────────────────────────────
+# ── STUDIO LIGHTING PRESET — "SIIL STUDIO COLOR" ─────────────────────────────
+# Official name: SIIL Studio Color
 # Derived from official SIIL product reference photography (Gracia, Sara, Tara
 # studio sessions). Characteristics:
 #   - Warm neutral seamless backdrop (sand / linen / mushroom — never white)
@@ -19,11 +20,15 @@ Usage:
 #   - Zero harsh shadows; wrap and skin both read clean and dimensional
 #   - Result: upscale fashion-wellness editorial feel
 
-SIIL_WARM_EDITORIAL = """LIGHTING STYLE — SIIL WARM EDITORIAL:
+SIIL_STUDIO_COLOR = """LIGHTING STYLE — SIIL STUDIO COLOR:
 Shoot with a large diffused softbox key light positioned upper-front-left at ~45 degrees, gentle wrap-around fill from the right (1-stop softer than key), warm color temperature (~4500K). Background is a seamless warm neutral backdrop — sand, mushroom, or terracotta linen — lit slightly brighter than model to create separation. Skin should appear luminous, warm, and glowing. Fabric shows clean tone with gentle depth — no blown-out highlights, no cold cast. Overall feel: premium fashion-wellness editorial, like a high-end medical-lifestyle brand shoot."""
 
 # Short version for inline use
-SIIL_WARM_EDITORIAL_SHORT = "Soft diffused luxe studio daylight. Warm wrap-around 4500K light, large upper-left softbox key, gentle right fill. Warm neutral backdrop. Luminous glowing skin. Zero harsh shadows. Premium fashion-wellness editorial."
+SIIL_STUDIO_COLOR_SHORT = "Soft diffused luxe studio daylight. Warm wrap-around 4500K light, large upper-left softbox key, gentle right fill. Warm neutral backdrop. Luminous glowing skin. Zero harsh shadows. Premium fashion-wellness editorial."
+
+# Aliases for backward compatibility
+SIIL_WARM_EDITORIAL = SIIL_STUDIO_COLOR
+SIIL_WARM_EDITORIAL_SHORT = SIIL_STUDIO_COLOR_SHORT
 
 # ── OSTOMY SCAR — STANDARD BLOCK ──────────────────────────────────────────────
 # Add this to EVERY generation prompt for models wearing the SIIL wrap/belt.
