@@ -26,9 +26,12 @@ import pathlib
 import re
 import secrets
 import shutil
+import threading
 import time
 import urllib.parse
+import uuid
 from html import escape
+from io import BytesIO
 from flask import Flask, jsonify, request, send_file, abort, redirect, url_for
 import requests
 
@@ -56,6 +59,33 @@ CANVA_CLIENT_SECRET = os.environ.get("CANVA_CLIENT_SECRET", "")  # optional for 
 CANVA_TOKEN_FILE = DATA_DIR.parent / "canva_token.json"
 CANVA_FOLDER_ID = os.environ.get("CANVA_FOLDER_ID", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://static.253.118.104.178.clients.your-server.de/review")
+
+# ── Regen / Gemini ─────────────────────────────────────────────────────────────
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+MODEL_REFS_DIR = DATA_DIR.parent / "model_refs"
+COMMENTS_FILE  = DATA_DIR.parent / "comments.json"
+REGEN_DIR      = DATA_DIR.parent / "regen_temp"
+REGEN_DIR.mkdir(parents=True, exist_ok=True)
+REGEN_JOBS: dict  = {}
+REGEN_LOCK = threading.Lock()
+
+MODEL_PORTRAITS: dict[str, str] = {
+    "Amara":   "Amara_portrait.jpg",
+    "Kim":     "Kim_portrait.jpg",
+    "Gracia":  "Gracia_portrait.jpg",
+    "Maria":   "Maria_portrait.jpg",
+    "Sofia":   "Sofia_portrait.jpg",
+    "Lia":     "Lia_portrait.jpg",
+    "Nora":    "Nora_portrait.jpg",
+    "Bruce":   "Bruce_portrait.jpg",
+    "Duli":    "Duli_portrait.jpg",
+    "Reed":    "Reed_portrait.jpg",
+    "Sara":    "Sara_portrait.jpg",
+    "Mollie":  "Mollie_portrait.jpg",
+    "Tara":    "Tara_portrait.jpg",
+    "Colleen": "Colleen_portrait.jpg",
+}
+WRAP_REF = "Gracia_basic_black.jpg"
 
 # OAuth re-authorization (added 2026-05-04 — token lineage was revoked, refresh dies forever)
 CANVA_AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize"
@@ -115,6 +145,130 @@ def _refresh_canva_token() -> str | None:
 def _canva_headers() -> dict:
     tok = _load_canva_token()
     return {"Authorization": f"Bearer {tok}"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Comments helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_comments() -> dict:
+    if COMMENTS_FILE.exists():
+        try:
+            return json.loads(COMMENTS_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_comments(d: dict) -> None:
+    COMMENTS_FILE.write_text(json.dumps(d, indent=2))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regen helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _b64_file(path: pathlib.Path) -> str | None:
+    if path.exists():
+        return base64.b64encode(path.read_bytes()).decode()
+    return None
+
+
+def _build_regen_parts(meta: dict, comment: str) -> list:
+    model   = meta.get("model", "")
+    color   = meta.get("color", "")
+    typ     = meta.get("type", "")
+    scene   = meta.get("scene", "")
+    product = meta.get("product", "SIIL Ostomy Wrap")
+
+    portrait_file = MODEL_PORTRAITS.get(model)
+    portrait_b64  = _b64_file(MODEL_REFS_DIR / portrait_file) if portrait_file else None
+    wrap_b64      = _b64_file(MODEL_REFS_DIR / WRAP_REF)
+
+    prompt = (
+        f"Regenerate this premium fashion editorial photograph.\n\n"
+        f"ORIGINAL CONTEXT: {product} — model {model} — {color} colour — {typ} shot — scene: {scene}\n\n"
+        f"ADJUSTMENT INSTRUCTION (apply this and only this change):\n{comment}\n\n"
+        f"Keep everything else identical: model identity, face, skin, hair, "
+        f"product colour and shape, scene type, composition, lighting quality.\n"
+    )
+    parts: list = [{"text": prompt}]
+    if portrait_b64:
+        parts.append({"text": f"Ref 1 — {model} identity (keep face, skin, hair exactly):"})
+        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": portrait_b64}})
+    if wrap_b64:
+        parts.append({"text": "Ref 2 — SIIL product shape reference (keep wrap silhouette exactly):"})
+        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": wrap_b64}})
+    return parts
+
+
+def _save_webp_regen(raw_bytes: bytes, out_path: pathlib.Path, max_kb: int = 320) -> int:
+    from PIL import Image
+    img = Image.open(BytesIO(raw_bytes)).convert("RGB")
+    w, h = img.size
+    new_h = w // 2
+    if new_h < h:
+        top = (h - new_h) // 2
+        img = img.crop((0, top, w, top + new_h))
+    img = img.resize((2880, 1440), Image.LANCZOS)
+    for q in [85, 80, 75, 70, 65]:
+        buf = BytesIO()
+        img.save(buf, "WEBP", quality=q, method=6)
+        if buf.tell() <= max_kb * 1024:
+            out_path.write_bytes(buf.getvalue())
+            return buf.tell() // 1024
+    buf = BytesIO()
+    img.save(buf, "WEBP", quality=65, method=6)
+    out_path.write_bytes(buf.getvalue())
+    return buf.tell() // 1024
+
+
+def run_regen(rel: str, comment: str, job_id: str) -> None:
+    """Background thread: call Gemini, write result to REGEN_DIR, update status file."""
+    status_file = REGEN_DIR / f"{job_id}.json"
+    try:
+        meta  = parse_filename_meta(pathlib.Path(rel).name)
+        parts = _build_regen_parts(meta, comment)
+        body  = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"],
+                "imageConfig": {"aspectRatio": "16:9"},
+            },
+        }
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            f"models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
+        )
+        for attempt in range(5):
+            try:
+                r = requests.post(url, json=body, timeout=180)
+                if r.status_code != 200:
+                    time.sleep(3); continue
+                data = r.json()
+                for c in data.get("candidates", []):
+                    for p in c.get("content", {}).get("parts", []):
+                        if "inlineData" in p:
+                            raw = base64.b64decode(p["inlineData"]["data"])
+                            out_path = REGEN_DIR / f"{job_id}.webp"
+                            _save_webp_regen(raw, out_path)
+                            status_file.write_text(json.dumps({"status": "done", "rel": rel}))
+                            return
+                for c in data.get("candidates", []):
+                    if c.get("finishReason") in ("SAFETY", "OTHER"):
+                        status_file.write_text(json.dumps({
+                            "status": "error",
+                            "error": f"Safety block on attempt {attempt+1}. Try rewording.",
+                            "rel": rel,
+                        }))
+                        return
+                time.sleep(3)
+            except Exception:
+                time.sleep(2)
+        status_file.write_text(json.dumps({"status": "error", "error": "Failed after 5 attempts", "rel": rel}))
+    except Exception as e:
+        status_file.write_text(json.dumps({"status": "error", "error": str(e)[:300], "rel": rel}))
+
 
 app = Flask(__name__)
 
@@ -191,8 +345,9 @@ def collect_facets(batches: list[dict]) -> dict:
 
 @app.route("/")
 def index():
-    batches = list_batches()
-    facets = collect_facets(batches)
+    batches  = list_batches()
+    facets   = collect_facets(batches)
+    comments = load_comments()
     total = sum(len(b["images"]) for b in batches)
     decisions = load_decisions()
     n_keep = sum(1 for v in decisions.values() if v.get("decision") in ("keep", "uploaded"))
@@ -214,6 +369,7 @@ def index():
             canva_btn_label = f"✓ In Canva" if d == "uploaded" else "↑ Canva"
             canva_btn_disabled = "disabled" if d == "uploaded" else ""
             asset_badge = f'<div class="asset-badge" title="Canva asset {escape(asset_id)}">→ Canva · {escape(asset_id[:10])}…</div>' if d == "uploaded" and asset_id else ""
+            saved_comment = escape(comments.get(img['rel_path'], ''))
             data_attrs = (
                 f'data-product="{escape(img.get("product",""))}" '
                 f'data-model="{escape(img.get("model",""))}" '
@@ -231,6 +387,10 @@ def index():
                 <div class="actions">
                   <button class="btn-canva {canva_active}" {canva_btn_disabled} onclick="uploadOne('{escape(img['rel_path'])}', this)">{canva_btn_label}</button>
                   <button class="btn-del {del_active}" onclick="decide('{escape(img['rel_path'])}','delete', this)">✗ Delete</button>
+                </div>
+                <div class="comment-row">
+                  <textarea class="card-comment" placeholder="Instruction for AI re-gen…" onblur="saveComment('{escape(img['rel_path'])}', this)">{saved_comment}</textarea>
+                  <button class="btn-regen" onclick="regenOne('{escape(img['rel_path'])}', this)" title="Re-generate with Gemini AI">↺</button>
                 </div>
                 {asset_badge}
                 <div class="card-status"></div>
@@ -337,6 +497,30 @@ def index():
   .actions .btn-canva.active {{ background:#7d2ae8; color:#fff; border-color:#7d2ae8; }}
   .actions .btn-del:hover {{ background:#f7e7dd; border-color:var(--bad); color:var(--bad); }}
   .actions .btn-del.active {{ background:var(--bad); color:#fff; border-color:var(--bad); }}
+  /* Comment + Regen row */
+  .comment-row {{ display:flex; gap:5px; margin-top:8px; align-items:flex-start; }}
+  .card-comment {{ flex:1; font-size:12px; padding:6px 8px; border:1px solid var(--rule); border-radius:6px;
+                   resize:vertical; min-height:36px; max-height:90px; font-family:inherit; color:var(--text); line-height:1.4; }}
+  .card-comment:focus {{ outline:none; border-color:var(--primary); box-shadow:0 0 0 2px rgba(61,92,122,.15); }}
+  .card-comment::placeholder {{ color:var(--muted); font-style:italic; font-size:11px; }}
+  .btn-regen {{ padding:6px 10px; font-size:14px; font-weight:700; border-radius:6px; border:1px solid var(--rule);
+                background:#fff; cursor:pointer; flex-shrink:0; line-height:1; }}
+  .btn-regen:hover {{ background:#e8f4ff; border-color:var(--primary); color:var(--primary); }}
+  .btn-regen:disabled {{ opacity:.4; cursor:default; }}
+  /* Regen comparison modal */
+  .regen-modal-inner {{ max-width:1000px !important; width:95% !important; }}
+  .regen-compare {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:14px 0; }}
+  .regen-side {{ display:flex; flex-direction:column; align-items:center; gap:6px; }}
+  .regen-side img {{ width:100%; max-height:400px; object-fit:contain; border-radius:6px; border:1px solid var(--rule); }}
+  .regen-label {{ font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }}
+  .regen-actions {{ display:flex; gap:10px; justify-content:center; margin-top:14px; flex-wrap:wrap; }}
+  .regen-actions button {{ padding:11px 20px; font-size:13px; font-weight:600; border-radius:7px; border:0; cursor:pointer; }}
+  .btn-regen-accept {{ background:var(--good); color:#fff; }}
+  .btn-regen-both   {{ background:var(--primary); color:#fff; }}
+  .btn-regen-discard {{ background:#fff; color:var(--muted); border:1px solid var(--rule) !important; }}
+  .regen-spinner {{ display:inline-block; width:12px; height:12px; border:2px solid rgba(0,0,0,.15);
+                    border-top-color:var(--primary); border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; }}
+  @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
   /* Lightbox */
   .lightbox {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.95); z-index:100; }}
   .lightbox.show {{ display:flex; align-items:center; justify-content:center; }}
@@ -405,6 +589,28 @@ def index():
     <div id="canva-status">Uploading…</div>
     <pre id="canva-log"></pre>
     <button onclick="closeCanva()">Close</button>
+  </div>
+</div>
+<div id="regen-modal" class="modal-bg" onclick="if(event.target===this)closeRegen()">
+  <div class="modal regen-modal-inner">
+    <h3 id="regen-title">AI Re-generation</h3>
+    <div id="regen-status">Generating…</div>
+    <div id="regen-compare" class="regen-compare" style="display:none">
+      <div class="regen-side">
+        <div class="regen-label">Original</div>
+        <img id="regen-orig" src="" alt="Original">
+      </div>
+      <div class="regen-side">
+        <div class="regen-label">New version</div>
+        <img id="regen-new" src="" alt="New version">
+      </div>
+    </div>
+    <div id="regen-actions" class="regen-actions" style="display:none">
+      <button class="btn-regen-accept" onclick="regenAction('accept')">✓ Accept (replace original)</button>
+      <button class="btn-regen-both" onclick="regenAction('both')">+ Keep both</button>
+      <button class="btn-regen-discard" onclick="regenAction('discard')">✗ Discard</button>
+    </div>
+    <button onclick="closeRegen()" style="margin-top:10px;font-size:13px;">Close</button>
   </div>
 </div>
 {filters_html}
@@ -885,6 +1091,104 @@ function checkCanvaAuth() {{
   }}).catch(() => {{}});
 }}
 window.addEventListener('load', checkCanvaAuth);
+
+// ── Comment auto-save (on blur) ──
+function saveComment(rel, ta) {{
+  const txt = ta.value.trim();
+  fetch('comment', {{
+    method: 'POST', headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{rel, comment: txt}})
+  }}).catch(() => {{}});
+}}
+
+// ── Regen feature ──
+let regenCurrentRel = null;
+let regenCurrentBtn = null;
+let regenJobId = null;
+let regenPollTimer = null;
+
+function regenOne(rel, btn) {{
+  const card = btn.closest('.card');
+  const ta = card ? card.querySelector('.card-comment') : null;
+  const comment = (ta ? ta.value.trim() : '') || 'Improve this image quality and composition.';
+  btn.disabled = true;
+  btn.innerHTML = '<span class="regen-spinner"></span>';
+  regenCurrentRel = rel;
+  regenCurrentBtn = btn;
+  regenJobId = null;
+  if (regenPollTimer) {{ clearTimeout(regenPollTimer); regenPollTimer = null; }}
+  // Open modal in loading state
+  document.getElementById('regen-title').textContent = 'AI Re-generation…';
+  document.getElementById('regen-status').innerHTML = '<span class="regen-spinner"></span> Generating with Gemini (30–90s)…';
+  document.getElementById('regen-compare').style.display = 'none';
+  document.getElementById('regen-actions').style.display = 'none';
+  document.getElementById('regen-modal').classList.add('show');
+  fetch('regen', {{
+    method: 'POST', headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{rel, comment}})
+  }}).then(r => r.json()).then(d => {{
+    if (!d.job_id) {{
+      document.getElementById('regen-status').textContent = '✗ Failed to start: ' + (d.error || 'unknown');
+      btn.disabled = false; btn.innerHTML = '↺';
+      return;
+    }}
+    regenJobId = d.job_id;
+    regenPollTimer = setTimeout(() => pollRegen(), 4000);
+  }}).catch(e => {{
+    document.getElementById('regen-status').textContent = '✗ ' + e.toString();
+    btn.disabled = false; btn.innerHTML = '↺';
+  }});
+}}
+
+function pollRegen() {{
+  if (!regenJobId) return;
+  fetch('regen_poll/' + regenJobId)
+    .then(r => r.json())
+    .then(d => {{
+      if (d.status === 'done') {{
+        showRegenModal();
+      }} else if (d.status === 'error') {{
+        document.getElementById('regen-status').textContent = '✗ ' + (d.error || 'Generation failed');
+        if (regenCurrentBtn) {{ regenCurrentBtn.disabled = false; regenCurrentBtn.innerHTML = '↺'; }}
+      }} else {{
+        // still pending
+        regenPollTimer = setTimeout(() => pollRegen(), 4000);
+      }}
+    }})
+    .catch(() => {{
+      regenPollTimer = setTimeout(() => pollRegen(), 5000);
+    }});
+}}
+
+function showRegenModal() {{
+  const card = regenCurrentRel
+    ? document.querySelector('.card[data-rel="' + regenCurrentRel.replace(/"/g, '\\"') + '"]')
+    : null;
+  const origImg = card ? card.querySelector('.image-wrap img') : null;
+  document.getElementById('regen-title').textContent = 'Compare — accept new version?';
+  document.getElementById('regen-status').textContent = '';
+  if (origImg) document.getElementById('regen-orig').src = origImg.src;
+  document.getElementById('regen-new').src = 'regen_img/' + regenJobId + '?t=' + Date.now();
+  document.getElementById('regen-compare').style.display = 'grid';
+  document.getElementById('regen-actions').style.display = 'flex';
+  if (regenCurrentBtn) {{ regenCurrentBtn.disabled = false; regenCurrentBtn.innerHTML = '↺'; }}
+}}
+
+function regenAction(action) {{
+  if (!regenJobId || !regenCurrentRel) {{ closeRegen(); return; }}
+  fetch('regen_accept', {{
+    method: 'POST', headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{job_id: regenJobId, rel: regenCurrentRel, action}})
+  }}).then(r => r.json()).then(() => {{
+    if (action !== 'discard') window.location.reload();
+    else closeRegen();
+  }}).catch(() => closeRegen());
+}}
+
+function closeRegen() {{
+  if (regenPollTimer) {{ clearTimeout(regenPollTimer); regenPollTimer = null; }}
+  document.getElementById('regen-modal').classList.remove('show');
+}}
 </script>
 </body></html>"""
     resp = app.make_response(html)
@@ -1453,6 +1757,101 @@ def canva_oauth_status():
         if _refresh_canva_token():
             return jsonify({"ok": True, "refreshed": True})
     return jsonify({"ok": False, "needs_auth": True})
+
+
+@app.route("/comment", methods=["POST"])
+def save_comment_route():
+    """Save a per-image AI instruction comment."""
+    data = request.get_json() or {}
+    rel = data.get("rel", "").replace("..", "")
+    comment = data.get("comment", "")
+    comments = load_comments()
+    if comment:
+        comments[rel] = comment
+    else:
+        comments.pop(rel, None)
+    save_comments(comments)
+    return jsonify({"ok": True})
+
+
+@app.route("/regen", methods=["POST"])
+def regen_route():
+    """Start a background Gemini regen job for one image. Returns {job_id}."""
+    data = request.get_json() or {}
+    rel = data.get("rel", "").replace("..", "")
+    comment = data.get("comment", "").strip()
+    if not rel or not comment:
+        return jsonify({"error": "rel and comment required"}), 400
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "GEMINI_API_KEY not configured on server"}), 500
+    job_id = str(uuid.uuid4())
+    status_file = REGEN_DIR / f"{job_id}.json"
+    status_file.write_text(json.dumps({"status": "pending", "rel": rel}))
+    t = threading.Thread(target=run_regen, args=(rel, comment, job_id), daemon=True)
+    t.start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/regen_poll/<job_id>")
+def regen_poll(job_id: str):
+    """Poll status of a regen job. Returns {status: pending|done|error, ...}."""
+    job_id = job_id.replace("..", "").replace("/", "")
+    status_file = REGEN_DIR / f"{job_id}.json"
+    if not status_file.exists():
+        return jsonify({"status": "error", "error": "Job not found"}), 404
+    try:
+        return jsonify(json.loads(status_file.read_text()))
+    except Exception:
+        return jsonify({"status": "error", "error": "Corrupt status file"}), 500
+
+
+@app.route("/regen_img/<job_id>")
+def regen_img(job_id: str):
+    """Serve the generated WebP result image for side-by-side comparison."""
+    job_id = job_id.replace("..", "").replace("/", "")
+    img_path = REGEN_DIR / f"{job_id}.webp"
+    if not img_path.exists():
+        abort(404)
+    return send_file(img_path, mimetype="image/webp")
+
+
+@app.route("/regen_accept", methods=["POST"])
+def regen_accept():
+    """Accept, keep-both, or discard a regen result.
+
+    action='accept'  → replaces original file with regen result
+    action='both'    → saves regen as <stem>_v2<ext> next to original
+    action='discard' → just cleans up temp files
+    """
+    data = request.get_json() or {}
+    job_id = data.get("job_id", "").replace("..", "").replace("/", "")
+    rel = data.get("rel", "").replace("..", "")
+    action = data.get("action", "discard")
+
+    img_path = REGEN_DIR / f"{job_id}.webp"
+    status_file = REGEN_DIR / f"{job_id}.json"
+
+    if action in ("accept", "both") and img_path.exists():
+        target_dir = (DATA_DIR / rel).parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if action == "accept":
+            dest = DATA_DIR / rel
+            shutil.copy2(str(img_path), str(dest))
+        else:
+            orig_stem = pathlib.Path(rel).stem
+            orig_suffix = pathlib.Path(rel).suffix
+            new_name = f"{orig_stem}_v2{orig_suffix}"
+            dest = target_dir / new_name
+            shutil.copy2(str(img_path), str(dest))
+
+    # Clean up temp files
+    for f in (img_path, status_file):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+
+    return jsonify({"ok": True, "action": action})
 
 
 @app.route("/healthz")
