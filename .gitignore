@@ -1,0 +1,15 @@
+.env
+canva_token.json
+canva_uploads.json
+decisions.json
+apply_deletes_log.json
+pkce_state.json
+comments.json
+data/
+trash/
+model_refs/
+__pycache__/
+*.pyc
+venv/
+gunicorn.access
+gunicorn.err

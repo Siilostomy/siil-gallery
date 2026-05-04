@@ -1,0 +1,16 @@
+[Unit]
+Description=SIIL Image Review — Flask app for keep/delete decisions
+After=network.target
+
+[Service]
+Type=simple
+User=siil_ostomy
+WorkingDirectory=/home/siil_ostomy/image-review
+Environment="DATA_DIR=/home/siil_ostomy/image-review/data"
+Environment="PORT=8196"
+ExecStart=/home/siil_ostomy/image-review/venv/bin/gunicorn -w 2 -b 127.0.0.1:8196 image_review:app --timeout 60
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
